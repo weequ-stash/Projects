@@ -11,6 +11,10 @@
 #include <utility>
 #include <vector>
 
+float GetDistanceChebyshevMin(const Vector3& A, const Vector3& B) {
+    return std::min(std::min(std::abs(B.x - A.x), std::abs(B.y - A.y)), std::abs(B.z - A.z));
+}
+
 float GetDistanceSq(const Vector3& A, const Vector3& B) {
     return (B.x - A.x) * (B.x - A.x) + (B.y - A.y) * (B.y - A.y) + (B.z - A.z) * (B.z - A.z);
 }
@@ -204,6 +208,8 @@ private:
             for(auto& id : cluster) {
                 if(!objects[id]->isMovable) continue;
 
+                objects[id]->vel = {0, 0, 0};
+
                 objects[id]->color = YELLOW; //* debug
 
                 Vector3 other = mass_center;
@@ -220,7 +226,7 @@ private:
                 other.z /= (mass_sum - objects[id]->mass);
 
                 // TODO: make function to get the projection of the surface OR change the behavior to track which edge collides instead of the worldpos (so that collision works properly for large shapes, ex. floor)
-                _ApplyForce(id, other, objects[id]->worldpos, Q_rsqrt(GetDistanceSq(objects[id]->worldpos, other)) * (mass_sum - objects[id]->mass) * COLLISION_MULTIPLIER);
+                _ApplyForce(id, other, objects[id]->worldpos, Q_rsqrt(GetDistanceChebyshevMin(objects[id]->worldpos, other)) * (mass_sum - objects[id]->mass) * COLLISION_MULTIPLIER);
             }
         }
 
@@ -238,6 +244,9 @@ private:
                 // check if close enough (y)
                 if(std::get<0>(collisionMap[1][i]) > obj->bbox.max.y && std::get<0>(collisionMap[1][i]) - 0.1f <= obj->bbox.max.y) {
                     objects[std::get<2>(collisionMap[1][i])]->isAirborn = false;
+
+                    //*  kinda against my philosophy to put this here
+                    // objects[std::get<2>(collisionMap[1][i])]->vel.y = 0;
                 }
             }
 
@@ -249,7 +258,7 @@ private:
         for(auto& obj : objects) {
             if(!obj->isAirborn || !obj->isMovable) continue; // continue, NOT A FUCKING RETURN YOU DUMBASS (the only contributor to the code is myself btw)
 
-            _ApplyForce(obj->id, {0, 0, 0}, {0, -1, 0}, GRAVITY * 5); // TODO optional: change the multiplier
+            _ApplyForce(obj->id, {0, 0, 0}, {0, -1, 0}, GRAVITY); // TODO optional: change the multiplier
         }
     }
 
@@ -282,16 +291,16 @@ private:
             obj->worldpos.z += obj->vel.z;
 
             // round up to zero
-            obj->vel.x = obj->vel.x < 0.0001f ? 0 : obj->vel.x;
-            obj->vel.y = obj->vel.y < 0.0001f ? 0 : obj->vel.y;
-            obj->vel.z = obj->vel.z < 0.0001f ? 0 : obj->vel.z;
+            obj->vel.x = std::abs(obj->vel.x) < 0.0001f ? 0 : obj->vel.x;
+            obj->vel.y = std::abs(obj->vel.y) < 0.0001f ? 0 : obj->vel.y;
+            obj->vel.z = std::abs(obj->vel.z) < 0.0001f ? 0 : obj->vel.z;
         }
     }
 
 public:
     // physic "constants"
     float GRAVITY = 9.81f;
-    float FRICTION_MULTIPLIER = 10.0f;
+    float FRICTION_MULTIPLIER = 1.0f;
     float COLLISION_MULTIPLIER = 0.7f;
 
     size_t NewGameObject(GameObject&& obj) { // TODO: something better ig
@@ -303,7 +312,7 @@ public:
 
         return objects.back()->id;
     }
-    size_t NewGameObject(std::vector<GameObject>&& objs) { // returns a pointer to the first element that has been added
+    size_t NewGameObject(std::vector<GameObject>&& objs) { // returns an index of the first element that has been added
         size_t size_before = objects.size();
         for(auto&& obj : objs) {
             objects.emplace_back(std::make_unique<GameObject>(std::move(obj)));
