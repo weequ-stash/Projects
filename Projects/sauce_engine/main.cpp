@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-float GetDistanceChebyshevMin(const Vector3& A, const Vector3& B) {
+float GetDistanceChebyshevMin(const Vector3& A, const Vector3& B) { // can't be negative
     return std::min(std::min(std::abs(B.x - A.x), std::abs(B.y - A.y)), std::abs(B.z - A.z));
 }
 
@@ -65,7 +65,7 @@ public:
     Vector3 vel;
     Vector3 acc;
     Vector3 dims;     // object dimentions (please initialize object using this param, bbox is calculated automatically)
-    BoundingBox bbox; // relative bounding box (calculated automatically)
+    BoundingBox bbox; // absolute bounding box (calculated automatically)
 
     Texture texture;
 };
@@ -79,6 +79,8 @@ private:
     std::vector<std::unique_ptr<GameObject>> objects;
 
     std::vector<std::tuple<float, bool, size_t>> collisionMap[3]; // {pos, start(0)/end(1), id}, 0 - x, 1 - y, 2 - z
+    std::set<std::pair<size_t, size_t>> ids[3];                   // {id, id} objects that are intersecting on x/y/z coordinate
+    std::map<size_t, std::vector<size_t>> clusters;               // {id of representantive if a cluster of intersecting objects, ids of those objects}
 
     // A -> startpos of the Force vector, B -> endpos of the Force vector
     void _ApplyForce(size_t id, const Vector3& A, const Vector3& B, float value) {
@@ -97,12 +99,12 @@ private:
 
     void _CalculateBBoxes() {
         for(auto& obj : objects) {
-            obj->bbox.min = {std::min(obj->worldpos.x - obj->dims.x / 2, obj->worldpos.x + obj->dims.x / 2),
-                             std::min(obj->worldpos.y - obj->dims.y / 2, obj->worldpos.y + obj->dims.y / 2),
-                             std::min(obj->worldpos.z - obj->dims.z / 2, obj->worldpos.z + obj->dims.z / 2)};
-            obj->bbox.max = {std::max(obj->worldpos.x - obj->dims.x / 2, obj->worldpos.x + obj->dims.x / 2),
-                             std::max(obj->worldpos.y - obj->dims.y / 2, obj->worldpos.y + obj->dims.y / 2),
-                             std::max(obj->worldpos.z - obj->dims.z / 2, obj->worldpos.z + obj->dims.z / 2)};
+            obj->bbox.min = {obj->worldpos.x - obj->dims.x / 2,
+                             obj->worldpos.y - obj->dims.y / 2,
+                             obj->worldpos.z - obj->dims.z / 2};
+            obj->bbox.max = {obj->worldpos.x + obj->dims.x / 2,
+                             obj->worldpos.y + obj->dims.y / 2,
+                             obj->worldpos.z + obj->dims.z / 2};
         }
     }
 
@@ -130,12 +132,12 @@ private:
         }
     }
 
-    void ResolveCollision() {
-        static std::set<std::pair<size_t, size_t>> ids[3];
+    void _CollisionBuildClusters() {
         static std::set<size_t> active;
-
         static size_t cur;
+        for(auto i : {0, 1, 2}) ids[i].clear();
 
+        // fill in ids - objects colliding from the x/y/z axis' perspective
         for(auto dim : {0, 1, 2}) {
             ids[dim].clear();
             active.clear();
@@ -169,14 +171,13 @@ private:
             return rep[id] = self(rep[id], self);
         };
 
-        // build rep
+        // build rep and potcol
         for(auto it = ids[0].begin(); it != ids[0].end(); ++it) {
             if(ids[1].contains(*it) && ids[2].contains(*it)) {
                 rep[std::max(it->first, it->second)] = std::min(it->first, it->second);
             }
         }
 
-        static std::map<size_t, std::vector<size_t>> clusters;
         clusters.clear();
 
         // build clusters
@@ -191,8 +192,91 @@ private:
                 obj->color = RED; //* debug
             }
         }
+    }
 
-        // compute for the every cluster
+    void _CollisionResolveCollidingOnAxis(int axis, const std::pair<size_t, size_t>& pair) { // TODO: FIX TS
+        size_t obj[2] = {pair.first, pair.second};
+
+        if((axis == 0 && objects[obj[0]]->worldpos.x > objects[obj[1]]->worldpos.x) ||
+           (axis == 1 && objects[obj[0]]->worldpos.y > objects[obj[1]]->worldpos.y) ||
+           (axis == 2 && objects[obj[0]]->worldpos.z > objects[obj[1]]->worldpos.z)) {
+            std::swap(obj[0], obj[1]);
+        }
+
+        Vector3 newpos[2];
+
+        newpos[0] = objects[obj[0]]->worldpos;
+        newpos[1] = objects[obj[1]]->worldpos;
+
+        if(objects[obj[0]]->isMovable) {
+            newpos[0].x += objects[obj[0]]->vel.x + objects[obj[0]]->acc.x * m_valuePerFrame;
+            newpos[0].y += objects[obj[0]]->vel.y + objects[obj[0]]->acc.y * m_valuePerFrame;
+            newpos[0].z += objects[obj[0]]->vel.z + objects[obj[0]]->acc.z * m_valuePerFrame;
+        }
+        if(objects[obj[1]]->isMovable) {
+            newpos[1].x += objects[obj[1]]->vel.x + objects[obj[1]]->acc.x * m_valuePerFrame;
+            newpos[1].y += objects[obj[1]]->vel.y + objects[obj[1]]->acc.y * m_valuePerFrame;
+            newpos[1].z += objects[obj[1]]->vel.z + objects[obj[1]]->acc.z * m_valuePerFrame;
+        }
+        // we only need first.max and second.min bounding boxes, so we use just the Vector3, and we only need just the <axis> axis
+        float newedge[2];
+
+        // clang-format off
+        newedge[0] = axis == 0 ? std::max(newpos[0].x - objects[obj[0]]->dims.x / 2, newpos[0].x + objects[obj[0]]->dims.x / 2) :
+                     axis == 1 ? std::max(newpos[0].y - objects[obj[0]]->dims.y / 2, newpos[0].y + objects[obj[0]]->dims.y / 2) :
+                                 std::max(newpos[0].z - objects[obj[0]]->dims.z / 2, newpos[0].z + objects[obj[0]]->dims.z / 2);
+
+        newedge[1] = axis == 0 ? std::min(newpos[1].x - objects[obj[1]]->dims.x / 2, newpos[1].x + objects[obj[1]]->dims.x / 2) :
+                     axis == 1 ? std::min(newpos[1].y - objects[obj[1]]->dims.y / 2, newpos[1].y + objects[obj[1]]->dims.y / 2) :
+                                 std::min(newpos[1].z - objects[obj[1]]->dims.z / 2, newpos[1].z + objects[obj[1]]->dims.z / 2);
+        // clang-format on
+
+        if(newedge[0] < newedge[1]) return;
+
+        float collisionpos = (newedge[0] + newedge[1]) / 2; // - (objects[obj[0]]->mass - objects[obj[1]]->mass);
+
+        if(!objects[obj[0]]->isMovable) collisionpos = newedge[0];
+        if(!objects[obj[1]]->isMovable) collisionpos = newedge[1];
+
+        Vector3 forcedir = {0, 0, 0};
+        if(axis == 0) {
+            forcedir.x = -1;
+        }
+        else if(axis == 1) {
+            forcedir.y = -1;
+        }
+        else {
+            forcedir.z = -1;
+        }
+
+        if(objects[obj[0]]->isMovable) objects[obj[0]]->color = BLUE;
+        if(objects[obj[1]]->isMovable) objects[obj[1]]->color = BLUE;
+
+        //* printf("%d, %d\n", obj[0], obj[1]);
+
+        if(objects[obj[0]]->isMovable) _ApplyForce(obj[0], {0, 0, 0}, forcedir, 1000 * -(collisionpos - newedge[0]));
+        if(objects[obj[1]]->isMovable) _ApplyForce(obj[1], {0, 0, 0}, forcedir, 1000 * -(collisionpos - newedge[1]));
+    }
+
+    void CollisionResolveCollidingButNotStucked() {
+        for(auto it = ids[0].begin(); it != ids[0].end(); ++it) {
+            if(ids[1].contains(*it) && !ids[2].contains(*it)) { // z
+                _CollisionResolveCollidingOnAxis(2, *it);
+            }
+            else {
+                if(ids[2].contains(*it) && !ids[1].contains(*it)) { // y
+                    _CollisionResolveCollidingOnAxis(1, *it);
+                }
+            }
+        }
+        for(auto it = ids[1].begin(); it != ids[1].end(); ++it) {
+            if(!ids[0].contains(*it) && ids[2].contains(*it)) { // x
+                _CollisionResolveCollidingOnAxis(0, *it);
+            }
+        }
+    }
+
+    void CollisionResolveStucked() {
         for(auto& [_, cluster] : clusters) {
             if(cluster.size() <= 1) continue;
 
@@ -216,10 +300,6 @@ private:
                 other.x -= objects[id]->worldpos.x * objects[id]->mass;
                 other.y -= objects[id]->worldpos.y * objects[id]->mass;
                 other.z -= objects[id]->worldpos.z * objects[id]->mass;
-
-                // other.x /= (cluster.size() - 1);
-                // other.y /= (cluster.size() - 1);
-                // other.z /= (cluster.size() - 1);
 
                 other.x /= (mass_sum - objects[id]->mass);
                 other.y /= (mass_sum - objects[id]->mass);
@@ -258,7 +338,7 @@ private:
         for(auto& obj : objects) {
             if(!obj->isAirborn || !obj->isMovable) continue; // continue, NOT A FUCKING RETURN YOU DUMBASS (the only contributor to the code is myself btw)
 
-            _ApplyForce(obj->id, {0, 0, 0}, {0, -1, 0}, GRAVITY); // TODO optional: change the multiplier
+            _ApplyForce(obj->id, {0, 0, 0}, {0, -1, 0}, GRAVITY * 0.01); // TODO optional: change the multiplier
         }
     }
 
@@ -273,14 +353,18 @@ private:
         _CalculateBBoxes();
         _ResetForces();
         _CollisionBuild3DMap();
+        _CollisionBuildClusters();
 
         HandleAirbornState();
-        ResolveCollision(); // TODO: make so that collision is calculated for the future frame and if something goes through a wall/floor, it prevents that (somethinig like wishpos)
         CalculateGravity();
         CalculateFriction();
 
-        // apply stuff
+        // Collision checks should be called at the end (after all other functions that have applied any physics)
 
+        CollisionResolveCollidingButNotStucked();
+        // CollisionResolveStucked(); // TODO: make so that collision is calculated for the future frame and if something goes through a wall/floor, it prevents that (somethinig like wishpos)
+
+        // apply stuff
         for(auto& obj : objects) {
             obj->vel.x += obj->acc.x * m_valuePerFrame;
             obj->vel.y += obj->acc.y * m_valuePerFrame;
@@ -300,7 +384,7 @@ private:
 public:
     // physic "constants"
     float GRAVITY = 9.81f;
-    float FRICTION_MULTIPLIER = 1.0f;
+    float FRICTION_MULTIPLIER = 0.9f;
     float COLLISION_MULTIPLIER = 0.7f;
 
     size_t NewGameObject(GameObject&& obj) { // TODO: something better ig
@@ -329,7 +413,6 @@ public:
         objects.at(id)->id = id;
         objects.pop_back();
     }
-
     void CalculateNextFrame() {
         m_frametimeAccumulator += GetFrameTime();
         while(m_frametimeAccumulator >= m_valuePerFrame) {
@@ -377,6 +460,7 @@ int main() {
                                             .worldpos = {0, -5.5, 0},
                                             .dims = {100, 10, 100}});
 
+    size_t tmp_last_obj = 0;
     while(!WindowShouldClose()) {
         BeginDrawing();
         ClearBackground(WHITE);
@@ -392,14 +476,14 @@ int main() {
         }
 
         if(IsKeyPressed(KEY_F)) {
-            engine.NewGameObject({.color = RED,
-                                  .mass = 10,
-                                  .worldpos = {
-                                      camera.target.x,
-                                      camera.target.y,
-                                      camera.target.z,
-                                  },
-                                  .dims = {1, 1, 1}});
+            tmp_last_obj = engine.NewGameObject({.color = RED,
+                                                 .mass = 10,
+                                                 .worldpos = {
+                                                     camera.target.x,
+                                                     camera.target.y,
+                                                     camera.target.z,
+                                                 },
+                                                 .dims = {1, 1, 1}});
         }
 
         engine.CalculateNextFrame();
